@@ -1,0 +1,5 @@
+streamlit
+pymorphy3
+pymorphy3-dicts-ru
+spacy
+openpyxl
