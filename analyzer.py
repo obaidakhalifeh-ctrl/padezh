@@ -49,6 +49,10 @@ PREP_CASES = {
     "с": {"gent", "ablt", "accs"}, "за": {"accs", "ablt"},
 }
 TRIGGERS = {"нет": {"gent"}}
+FIXED_POSSESSIVES = {"его", "её", "ее", "их"}   # ضمائر ملكية ثابتة بدون حالة
+
+# ضمائر ملكية ثابتة: ما بتتصرف ولا إلها حالة (بتقابل الضمير المتصل بالعربية)
+INVARIANT_POSS = {"его": "ـه", "её": "ـها", "ее": "ـها", "их": "ـهم"}
 
 
 # ---------- الدوال ----------
@@ -61,6 +65,26 @@ def norm_case(p):
 def spacy_case(token):
     vals = token.morph.get("Case")
     return SPACY_CASE.get(vals[0]) if vals else None
+
+
+def is_fixed_possessive(token):
+    """его/её/их لما بتوصف اسم بعدها (مش لما تكون ضمير شخصي)"""
+    if token.text.lower() not in FIXED_POSSESSIVES:
+        return False
+    head = token.head
+    if (head.i > token.i and head.pos_ in ("NOUN", "PROPN")
+            and token.dep_ in ("det", "nmod", "amod")):
+        return True
+    # احتياطي: spaCy أحياناً بيغلط بالتصنيف، فبنشوف الكلمات اللي بعدها
+    doc, i = token.doc, token.i
+    nxt = doc[i + 1] if i + 1 < len(doc) else None
+    nxt2 = doc[i + 2] if i + 2 < len(doc) else None
+    if nxt is not None and nxt.pos_ in ("NOUN", "PROPN"):
+        return True
+    if (nxt is not None and nxt2 is not None
+            and nxt.pos_ == "ADJ" and nxt2.pos_ in ("NOUN", "PROPN")):
+        return True
+    return False
 
 
 def candidates(token):
@@ -135,13 +159,51 @@ def syncretism_note(parse, cands, case_code):
 
 
 def analyze_text(text):
-    rows = []
-    for token in nlp(text):
+    doc = nlp(text)
+
+    # المرور الأول: اختيار تحليل لكل كلمة
+    chosen = {}                       # فهرس الكلمة -> (التحليل، كل الاحتمالات)
+    for token in doc:
         if token.is_punct or token.is_space:
+            continue
+        chosen[token.i] = choose_parse(token, get_prep(token))
+
+    # المرور الثاني: الصفات والضمائر الملكية تتبع حالة الاسم اللي بتصفه
+    for token in doc:
+        if token.i not in chosen or token.dep_ not in ("amod", "det"):
+            continue
+        if is_fixed_possessive(token):
+            continue
+        head = token.head
+        if head.i == token.i or head.i not in chosen:
+            continue
+        head_case = norm_case(chosen[head.i][0])
+        if not head_case:
+            continue
+        p, cands = chosen[token.i]
+        if norm_case(p) != head_case:
+            for c in cands:           # بس إذا شكل الكلمة بيسمح بهالحالة
+                if norm_case(c) == head_case:
+                    chosen[token.i] = (c, cands)
+                    break
+
+    # المرور الثالث: بناء النتيجة
+    rows = []
+    for token in doc:
+        if token.i not in chosen:
             rows.append({"word": token.text, "is_word": False})
             continue
+        p, cands = chosen[token.i]
+        if is_fixed_possessive(token):
+            rows.append({
+                "word": token.text, "is_word": True, "lemma": p.normal_form,
+                "pos": "ضمير ملكي ثابت", "case_code": None, "case": "—",
+                "gender": "—", "number": "—", "tense": "—", "aspect": "—",
+                "reason": "ضمير ملكي ثابت: ما بيتغير حسب الحالة، وبيوصف الاسم اللي بعده",
+                "note": "—",
+            })
+            continue
         prep = get_prep(token)
-        p, cands = choose_parse(token, prep)
         t = p.tag
         code = norm_case(p)
         pos = str(t.POS) if t.POS else None
