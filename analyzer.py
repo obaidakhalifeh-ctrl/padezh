@@ -51,6 +51,26 @@ PREP_CASES = {
 TRIGGERS = {"нет": {"gent"}}
 FIXED_POSSESSIVES = {"его", "её", "ее", "их"}   # ضمائر ملكية ثابتة بدون حالة
 
+# أفعال بتطلب حالة معينة لمتممها المباشر (بدون حرف جر)
+REKTION = {
+    "gent": {"бояться", "испугаться", "пугаться", "избегать", "избежать",
+             "достигать", "достичь", "добиваться", "добиться", "касаться",
+             "коснуться", "лишаться", "лишиться", "требовать", "потребовать",
+             "стесняться", "остерегаться", "опасаться", "сторониться",
+             "придерживаться", "желать", "пожелать"},
+    "datv": {"помогать", "помочь", "звонить", "позвонить", "советовать",
+             "посоветовать", "мешать", "помешать", "доверять", "удивляться",
+             "удивиться", "радоваться", "обрадоваться", "завидовать",
+             "позавидовать", "принадлежать", "нравиться", "понравиться",
+             "отвечать", "ответить", "верить", "поверить"},
+    "ablt": {"пользоваться", "интересоваться", "заниматься", "увлекаться",
+             "владеть", "руководить", "управлять", "гордиться", "любоваться",
+             "наслаждаться", "обладать", "становиться", "стать", "казаться",
+             "являться"},
+}
+VERB_CASE = {v: c for c, vs in REKTION.items() for v in vs}
+REKTION_DEPS = ("obj", "iobj", "obl", "xcomp")
+
 # ضمائر ملكية ثابتة: ما بتتصرف ولا إلها حالة (بتقابل الضمير المتصل بالعربية)
 INVARIANT_POSS = {"его": "ـه", "её": "ـها", "ее": "ـها", "их": "ـهم"}
 
@@ -87,6 +107,26 @@ def is_fixed_possessive(token):
     return False
 
 
+def head_lemma(token):
+    """أصل الفعل اللي الكلمة تابعة له"""
+    head = token.head
+    if head.pos_ not in ("VERB", "AUX"):
+        return None
+    for p in morph.parse(head.text):
+        if p.tag.POS in ("VERB", "INFN"):
+            return p.normal_form
+    return None
+
+
+def rektion_case(token):
+    """الحالة اللي بيطلبها الفعل لهالكلمة (إذا الفعل بالجدول)"""
+    if token.dep_ not in REKTION_DEPS or get_prep(token):
+        return None, None
+    hl = head_lemma(token)
+    case = VERB_CASE.get(hl)
+    return (case, hl) if case else (None, None)
+
+
 def candidates(token):
     """كل تحليلات pymorphy3 المتوافقة مع نوع الكلمة عند spaCy"""
     parses = morph.parse(token.text)
@@ -104,6 +144,11 @@ def get_prep(token):
 
 def choose_parse(token, prep):
     cands = candidates(token)
+    exp, _ = rektion_case(token)
+    if exp:                                  # 0) الفعل بيطلب حالة معينة
+        for p in cands:
+            if norm_case(p) == exp:
+                return p, cands
     sp = spacy_case(token)
     if sp:                                   # 1) حالة spaCy إن وافقت الصرف
         for p in cands:
@@ -127,6 +172,9 @@ def explain(token, case_code, prep):
         if len(allowed) == 1:
             return f"حرف الجر «{prep}» بيطلب {CASES[case_code]}"
         return f"بعد حرف الجر «{prep}» (بياخد أكثر من حالة حسب المعنى)"
+    exp, hl = rektion_case(token)
+    if exp and case_code == exp:
+        return f"الفعل «{head}» ({hl}) بيطلب {CASES[exp]}"
     dep = token.dep_
     if (not prep and head in TRIGGERS and case_code in TRIGGERS[head]
             and token.dep_ in ("nsubj", "obj", "obl")):
