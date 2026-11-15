@@ -1,5 +1,6 @@
-streamlit
+streamlit>=1.40
 pymorphy3
 pymorphy3-dicts-ru
-spacy
+spacy>=3.8,<3.9
+ru_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/ru_core_news_sm-3.8.0/ru_core_news_sm-3.8.0-py3-none-any.whl
 openpyxl

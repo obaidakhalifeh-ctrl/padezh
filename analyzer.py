@@ -130,13 +130,14 @@ def is_fixed_possessive(token):
 
 
 def head_lemma(token):
-    """أصل الفعل اللي الكلمة تابعة له"""
+    """أصل الفعل اللي الكلمة تابعة له (حتى لو spaCy غلط بتصنيف الفعل)"""
     head = token.head
-    if head.pos_ not in ("VERB", "AUX"):
-        return None
-    for p in morph.parse(head.text):
-        if p.tag.POS in ("VERB", "INFN"):
+    verbs = [p for p in morph.parse(head.text) if p.tag.POS in ("VERB", "INFN")]
+    for p in verbs:                       # أولوية للأفعال اللي بجدول rection
+        if p.normal_form in VERB_CASE:
             return p.normal_form
+    if head.pos_ in ("VERB", "AUX") and verbs:
+        return verbs[0].normal_form
     return None
 
 
@@ -241,51 +242,60 @@ def choose_parse(token, prep):
     return cands[0], cands                   # 3) الأعلى احتمالاً
 
 
-def explain(token, case_code, prep):
+def explain_full(token, case_code, prep):
+    """يرجع (نص السبب، نوع السبب، مفتاح) — النوع والمفتاح بيستعملهم شرح الواجهة"""
     head = token.head.text.lower()
     if prep and case_code in PREP_CASES.get(prep, set()):
-        if prep in ("в", "на"):
+        if prep in ("в", "во", "на"):
             if case_code == "accs":
-                return f"«{prep}» مع الاتجاه (حركة نحو مكان) بتطلب винительный"
-            return f"«{prep}» مع المكان (سكون) بتطلب предложный"
+                return (f"«{prep}» مع الاتجاه (حركة نحو مكان) يتطلب винительный", "prep", prep)
+            return (f"«{prep}» مع المكان (سكون) يتطلب предложный", "prep", prep)
         allowed = PREP_CASES[prep]
         if len(allowed) == 1:
-            return f"حرف الجر «{prep}» بيطلب {CASES[case_code]}"
-        return f"بعد حرف الجر «{prep}» (بياخد أكثر من حالة حسب المعنى)"
+            return (f"حرف الجر «{prep}» يتطلب {CASES[case_code]}", "prep", prep)
+        return (f"بعد حرف الجر «{prep}» (يأخذ أكثر من حالة بحسب المعنى)", "prep", prep)
     exp, hl = rektion_case(token)
     if exp and case_code == exp:
         if hl == "COMP":
-            return f"بعد صيغة التفضيل «{head}» (بدون чем): родительный المقارنة"
-        return f"الفعل «{head}» ({hl}) بيطلب {CASES[exp]}"
+            return (f"بعد صيغة التفضيل «{head}» (بدون чем): родительный المقارنة", "comparative", head)
+        return (f"الفعل «{head}» ({hl}) يتطلب {CASES[exp]}", "rektion", hl)
     dep = token.dep_
     if (not prep and head in TRIGGERS and case_code in TRIGGERS[head]
             and token.dep_ in ("nsubj", "obj", "obl")):
-        return f"بعد «{head}»: النفي بياخد родительный"
+        return (f"بعد «{head}»: النفي يتطلب родительный", "negation", head)
     if dep == "obj" and case_code == "accs":
-        return f"مفعول به مباشر للفعل «{head}»"
+        return (f"مفعول به مباشر للفعل «{head}»", "obj", head)
     if dep == "iobj" and case_code == "datv":
-        return f"مفعول غير مباشر للفعل «{head}»"
+        return (f"مفعول غير مباشر للفعل «{head}»", "iobj", head)
     if dep == "nsubj" and case_code == "nomn":
-        return "فاعل الجملة"
+        return ("فاعل الجملة", "nsubj", head)
     if dep == "obl" and case_code == "ablt" and not prep:
-        return "الأداة أو الوسيلة"
+        return ("الأداة أو الوسيلة", "instrumental", head)
     if dep == "nmod" and case_code == "gent":
-        return f"مضاف إليه: تابع للاسم «{head}»"
+        return (f"مضاف إليه: تابع للاسم «{head}»", "genitive_attr", head)
     if dep in ("amod", "det") and case_code:
-        return f"بتتوافق مع «{head}» بالحالة والجنس والعدد"
-    return "—"
+        return (f"تتوافق مع «{head}» في الحالة والجنس والعدد", "agreement", head)
+    return ("—", "none", "")
+
+
+def explain(token, case_code, prep):
+    return explain_full(token, case_code, prep)[0]
+
+
+def syncretism_full(parse, cands, case_code):
+    """تنبيه لما شكل الكلمة بيصلح لأكثر من حالة: (النص، النوع)"""
+    possible = {norm_case(p) for p in cands}
+    if case_code == "accs" and "gent" in possible and parse.tag.animacy == "anim":
+        return ("المذكر الحي (والجمع الحي): винительный يشبه родительный في الشكل", "anim_acc_gen")
+    if case_code == "accs" and "nomn" in possible:
+        return ("شكل هذه الكلمة مطابق لشكل именительный، والسياق هو الذي يحدد الحالة", "acc_nom")
+    if len(possible) > 2:
+        return ("شكل هذه الكلمة يصلح لأكثر من حالة، والسياق هو الذي يحدد", "multi")
+    return ("—", "none")
 
 
 def syncretism_note(parse, cands, case_code):
-    """تنبيه لما شكل الكلمة بيصلح لأكثر من حالة"""
-    possible = {norm_case(p) for p in cands}
-    if case_code == "accs" and "gent" in possible and parse.tag.animacy == "anim":
-        return "المذكر الحي (والجمع الحي): винительный بيشبه родительный بالشكل"
-    if case_code == "accs" and "nomn" in possible:
-        return "شكل هالكلمة نفس شكل именительный، والسياق هو اللي بحدد الحالة"
-    if len(possible) > 2:
-        return "شكل هالكلمة بيصلح لأكثر من حالة، والسياق بحدد"
-    return "—"
+    return syncretism_full(parse, cands, case_code)[0]
 
 
 def analyze_text(text):
@@ -330,6 +340,8 @@ def analyze_text(text):
                 "pos": "جزء من كلمة مركبة أو عبارة ثابتة", "case_code": None,
                 "case": "—", "gender": "—", "number": "—", "tense": "—",
                 "aspect": "—", "reason": "—", "note": "—",
+                "reason_kind": "none", "reason_key": "", "note_kind": "none",
+                "head": token.head.text.lower(),
             })
             continue
         if is_fixed_possessive(token):
@@ -337,14 +349,18 @@ def analyze_text(text):
                 "word": token.text, "is_word": True, "lemma": p.normal_form,
                 "pos": "ضمير ملكي ثابت", "case_code": None, "case": "—",
                 "gender": "—", "number": "—", "tense": "—", "aspect": "—",
-                "reason": "ضمير ملكي ثابت: ما بيتغير حسب الحالة، وبيوصف الاسم اللي بعده",
-                "note": "—",
+                "reason": "ضمير ملكي ثابت: لا يتغير بحسب الحالة، ويصف الاسم الذي بعده",
+                "note": "—", "reason_kind": "possessive_fixed",
+                "reason_key": token.text.lower(), "note_kind": "none",
+                "head": token.head.text.lower(),
             })
             continue
         prep = get_prep(token)
         t = p.tag
         code = norm_case(p)
         pos = str(t.POS) if t.POS else None
+        reason, rkind, rkey = explain_full(token, code, prep) if code else ("—", "none", "")
+        note, nkind = syncretism_full(p, cands, code) if code else ("—", "none")
         rows.append({
             "word": token.text,
             "is_word": True,
@@ -356,7 +372,11 @@ def analyze_text(text):
             "number": NUMBERS.get(t.number, "—"),
             "tense": TENSES.get(t.tense, "—"),
             "aspect": ASPECTS.get(t.aspect, "—"),
-            "reason": explain(token, code, prep) if code else "—",
-            "note": syncretism_note(p, cands, code) if code else "—",
+            "reason": reason,
+            "note": note,
+            "reason_kind": rkind,
+            "reason_key": rkey,
+            "note_kind": nkind,
+            "head": token.head.text.lower(),
         })
     return rows
