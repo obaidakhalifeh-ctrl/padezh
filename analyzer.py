@@ -1,8 +1,11 @@
+import os
+
 import pymorphy3
 import spacy
 
 morph = pymorphy3.MorphAnalyzer()
-nlp = spacy.load("ru_core_news_sm")
+MODEL = os.environ.get("PADEZH_MODEL", "ru_core_news_sm")
+nlp = spacy.load(MODEL)
 
 # ---------- القواميس ----------
 CASES = {
@@ -40,15 +43,34 @@ POS_MAP = {
 
 # ---------- القواعد ----------
 PREP_CASES = {
-    "у": {"gent"}, "из": {"gent"}, "без": {"gent"}, "для": {"gent"},
-    "от": {"gent"}, "до": {"gent"}, "около": {"gent"},
-    "к": {"datv"}, "по": {"datv"},
-    "над": {"ablt"}, "перед": {"ablt"},
-    "о": {"loct"}, "при": {"loct"},
-    "в": {"accs", "loct"}, "на": {"accs", "loct"},
-    "с": {"gent", "ablt", "accs"}, "за": {"accs", "ablt"},
+    # родительный
+    "у": {"gent"}, "из": {"gent"}, "изо": {"gent"}, "из-за": {"gent"},
+    "из-под": {"gent"}, "без": {"gent"}, "безо": {"gent"}, "для": {"gent"},
+    "от": {"gent"}, "до": {"gent"}, "около": {"gent"}, "возле": {"gent"},
+    "вокруг": {"gent"}, "после": {"gent"}, "вместо": {"gent"},
+    "кроме": {"gent"}, "среди": {"gent"}, "против": {"gent"},
+    "мимо": {"gent"}, "ради": {"gent"}, "внутри": {"gent"},
+    "вдоль": {"gent"}, "посреди": {"gent"}, "вследствие": {"gent"},
+    "насчёт": {"gent"}, "насчет": {"gent"},
+    # дательный
+    "к": {"datv"}, "ко": {"datv"}, "по": {"datv"}, "благодаря": {"datv"},
+    "согласно": {"datv"}, "вопреки": {"datv"}, "навстречу": {"datv"},
+    "подобно": {"datv"}, "вслед": {"datv"}, "наперекор": {"datv"},
+    # творительный
+    "над": {"ablt"}, "надо": {"ablt"}, "перед": {"ablt"},
+    "передо": {"ablt"}, "между": {"ablt"},
+    # предложный
+    "о": {"loct"}, "об": {"loct"}, "обо": {"loct"}, "при": {"loct"},
+    # винительный
+    "через": {"accs"}, "сквозь": {"accs"}, "про": {"accs"},
+    # أكثر من حالة حسب المعنى
+    "в": {"accs", "loct"}, "во": {"accs", "loct"}, "на": {"accs", "loct"},
+    "с": {"gent", "ablt", "accs"}, "со": {"gent", "ablt", "accs"},
+    "за": {"accs", "ablt"}, "под": {"accs", "ablt"}, "подо": {"accs", "ablt"},
 }
 TRIGGERS = {"нет": {"gent"}}
+# حروف جر ليها استعمالات إضافية بحالات ثانية، فما بنفرضها على spaCy
+WEAK_PREPS = {"по", "о", "об", "обо"}
 FIXED_POSSESSIVES = {"его", "её", "ее", "их"}   # ضمائر ملكية ثابتة بدون حالة
 
 # أفعال بتطلب حالة معينة لمتممها المباشر (بدون حرف جر)
@@ -92,7 +114,7 @@ def is_fixed_possessive(token):
     if token.text.lower() not in FIXED_POSSESSIVES:
         return False
     head = token.head
-    if (head.i > token.i and head.pos_ in ("NOUN", "PROPN")
+    if (head.i != token.i and head.pos_ in ("NOUN", "PROPN")
             and token.dep_ in ("det", "nmod", "amod")):
         return True
     # احتياطي: spaCy أحياناً بيغلط بالتصنيف، فبنشوف الكلمات اللي بعدها
@@ -118,13 +140,55 @@ def head_lemma(token):
     return None
 
 
+def is_comparative_complement(token):
+    """اسم أو ضمير بعد صيغة تفضيل بدون «чем»: родительный المقارنة (старше меня)"""
+    head = token.head
+    if head.i == token.i or head.pos_ not in ("ADJ", "ADV"):
+        return False
+    if token.pos_ not in ("NOUN", "PROPN", "PRON") or token.dep_ not in ("obj", "obl", "nmod"):
+        return False
+    if not any(p.tag.POS == "COMP" for p in morph.parse(head.text)):
+        return False
+    doc = token.doc
+    near = [t.text.lower() for t in doc[max(0, token.i - 2):token.i]] + [c.text.lower() for c in head.children]
+    return not any(w in ("чем", "нежели") for w in near)
+
+
 def rektion_case(token):
-    """الحالة اللي بيطلبها الفعل لهالكلمة (إذا الفعل بالجدول)"""
-    if token.dep_ not in REKTION_DEPS or get_prep(token):
+    """الحالة اللي بيطلبها الفعل (أو صيغة التفضيل) لهالكلمة"""
+    if get_prep(token):
         return None, None
-    hl = head_lemma(token)
-    case = VERB_CASE.get(hl)
-    return (case, hl) if case else (None, None)
+    if token.dep_ in REKTION_DEPS:
+        hl = head_lemma(token)
+        case = VERB_CASE.get(hl)
+        if case:
+            return case, hl
+    if is_comparative_complement(token):
+        return "gent", "COMP"
+    return None, None
+
+
+PARTICLES_AFTER_HYPHEN = {"то", "нибудь", "либо", "таки", "ка"}
+
+
+def force_no_case(token):
+    """أجزاء كلمات مركبة وعبارات ثابتة ما إلها حالة"""
+    doc, i = token.doc, token.i
+    low = token.text.lower()
+    if i > 0 and doc[i - 1].text == "-" and low in PARTICLES_AFTER_HYPHEN:
+        return True                                   # какого-то، кто-нибудь
+    if (i + 1 < len(doc) and doc[i + 1].text == "-"
+            and not any(p.is_known for p in morph.parse(token.text))):
+        nxt = doc[i + 2] if i + 2 < len(doc) else None
+        proper = (token.text[:1].isupper() and nxt is not None
+                  and nxt.text[:1].isupper())
+        if not proper:                                # Санкт-Петербург: الاسمين مع بعض
+            return True                               # финно-угорской، волжско-финского
+    if low == "то" and [t.text.lower() for t in doc[i + 1:i + 3]] == ["и", "дело"]:
+        return True                                   # то и дело
+    if low == "дело" and [t.text.lower() for t in doc[max(0, i - 2):i]] == ["то", "и"]:
+        return True
+    return False
 
 
 def candidates(token):
@@ -139,6 +203,17 @@ def get_prep(token):
     for child in token.children:
         if child.dep_ == "case" and child.pos_ == "ADP":
             return child.text.lower()
+    # احتياطي: spaCy أحياناً بيغلط، فنشوف حرف الجر الملاصق قبل الاسم وصفاته
+    if token.pos_ in ("NOUN", "PROPN", "PRON"):
+        doc = token.doc
+        j = token.i - 1
+        while j >= 0 and ((doc[j].head.i == token.i
+                           and doc[j].pos_ in ("ADJ", "DET", "NUM", "PRON"))
+                          or doc[j].text == "-"
+                          or (j + 1 < len(doc) and doc[j + 1].text == "-")):
+            j -= 1
+        if j >= 0 and doc[j].text.lower() in PREP_CASES:
+            return doc[j].text.lower()
     return None
 
 
@@ -148,6 +223,11 @@ def choose_parse(token, prep):
     if exp:                                  # 0) الفعل بيطلب حالة معينة
         for p in cands:
             if norm_case(p) == exp:
+                return p, cands
+    if (prep in PREP_CASES and len(PREP_CASES[prep]) == 1
+            and prep not in WEAK_PREPS):     # 0.5) حرف جر بحالة وحيدة: بيتغلّب على spaCy
+        for p in cands:
+            if norm_case(p) in PREP_CASES[prep]:
                 return p, cands
     sp = spacy_case(token)
     if sp:                                   # 1) حالة spaCy إن وافقت الصرف
@@ -174,6 +254,8 @@ def explain(token, case_code, prep):
         return f"بعد حرف الجر «{prep}» (بياخد أكثر من حالة حسب المعنى)"
     exp, hl = rektion_case(token)
     if exp and case_code == exp:
+        if hl == "COMP":
+            return f"بعد صيغة التفضيل «{head}» (بدون чем): родительный المقارنة"
         return f"الفعل «{head}» ({hl}) بيطلب {CASES[exp]}"
     dep = token.dep_
     if (not prep and head in TRIGGERS and case_code in TRIGGERS[head]
@@ -242,6 +324,14 @@ def analyze_text(text):
             rows.append({"word": token.text, "is_word": False})
             continue
         p, cands = chosen[token.i]
+        if force_no_case(token):
+            rows.append({
+                "word": token.text, "is_word": True, "lemma": token.text.lower(),
+                "pos": "جزء من كلمة مركبة أو عبارة ثابتة", "case_code": None,
+                "case": "—", "gender": "—", "number": "—", "tense": "—",
+                "aspect": "—", "reason": "—", "note": "—",
+            })
+            continue
         if is_fixed_possessive(token):
             rows.append({
                 "word": token.text, "is_word": True, "lemma": p.normal_form,
